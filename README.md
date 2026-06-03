@@ -285,19 +285,6 @@ cryptolens/
 
 ---
 
-## Next Steps (after MVP validation)
-
-Once the signal pipeline proves accurate:
-
-1. Add more coins and indicators (Stochastic, Williams %R)
-2. Add sentiment analysis (Twitter/Reddit feed)
-3. LSTM layer on top of XGBoost for sequence patterns
-4. Portfolio feature (multi-coin allocation)
-5. Price alerts (WebSocket push)
-6. User auth + saved watchlists
-7. AI chat assistant explaining signals
-
----
 
 ## Disclaimer
 
