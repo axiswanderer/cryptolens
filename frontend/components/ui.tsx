@@ -1,6 +1,6 @@
 "use client";
+import React, { ReactNode, useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
-import { ReactNode, useEffect, useRef, useState } from "react";
 
 // ── Terminal Panel ────────────────────────────────────────────────────────
 
@@ -10,12 +10,14 @@ export function Panel({
   label,
   signal,
   flicker = false,
+  style,
 }: {
   children: ReactNode;
   className?: string;
   label?: string;
   signal?: "BUY" | "HOLD" | "SELL";
   flicker?: boolean;
+  style?: React.CSSProperties;
 }) {
   const accent = signal === "BUY" ? "var(--green)" : signal === "SELL" ? "var(--red)" : signal === "HOLD" ? "var(--amber)" : "var(--green)";
 
@@ -23,6 +25,7 @@ export function Panel({
     <div
       className={clsx("relative", flicker && "animate-[flicker_8s_ease-in-out_infinite]", className)}
       style={{
+        ...style,
         background: "var(--bg2)",
         border: `1px solid ${accent}33`,
         clipPath: "polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%)",
