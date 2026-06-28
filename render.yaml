@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: cryptolens-api
+    env: python
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # Set this to your Neon connection string
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_SECRET_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false          # Set this to your Vercel URL, e.g. https://cryptolens.vercel.app
+      - key: ENV
+        value: production
+      - key: MODEL_PATH
+        value: ./models/xgboost_model.joblib
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHON_VERSION
+        value: 3.11.9

@@ -21,6 +21,7 @@ from app.services.data_collector import (
     load_ohlcv,
     SUPPORTED_SYMBOLS,
 )
+from app.ml.train_model import train as run_training
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -166,6 +167,13 @@ def get_prediction_history(
             for r in records
         ],
     }
+
+
+@router.post("/train", tags=["Data"])
+async def trigger_training(background_tasks: BackgroundTasks):
+    """Train the XGBoost model on data already in the database. Runs in background."""
+    background_tasks.add_task(run_training)
+    return {"message": "Model training started in background. Check /api/v1/health for status."}
 
 
 @router.post("/backfill", tags=["Data"])
