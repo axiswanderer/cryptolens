@@ -1,14 +1,14 @@
 """
 Data Collection Service
-Fetches OHLCV data from Yahoo Finance and stores in PostgreSQL.
+Fetches OHLCV data from CryptoCompare and stores in PostgreSQL.
 """
 import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+import httpx
 import pandas as pd
-import yfinance as yf
 from sqlalchemy.orm import Session
 
 from app.database.db import MarketData, SessionLocal
@@ -22,48 +22,55 @@ SUPPORTED_SYMBOLS = [
     "XRPUSDT", "DOTUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT",
 ]
 
+_CC_BASE = "https://min-api.cryptocompare.com/data/v2/histoday"
+
 _SYMBOL_MAP = {
-    "BTCUSDT":  "BTC-USD",
-    "ETHUSDT":  "ETH-USD",
-    "SOLUSDT":  "SOL-USD",
-    "BNBUSDT":  "BNB-USD",
-    "ADAUSDT":  "ADA-USD",
-    "XRPUSDT":  "XRP-USD",
-    "DOTUSDT":  "DOT-USD",
-    "AVAXUSDT": "AVAX-USD",
-    "MATICUSDT":"MATIC-USD",
-    "LINKUSDT": "LINK-USD",
+    "BTCUSDT":  "BTC",
+    "ETHUSDT":  "ETH",
+    "SOLUSDT":  "SOL",
+    "BNBUSDT":  "BNB",
+    "ADAUSDT":  "ADA",
+    "XRPUSDT":  "XRP",
+    "DOTUSDT":  "DOT",
+    "AVAXUSDT": "AVAX",
+    "MATICUSDT":"MATIC",
+    "LINKUSDT": "LINK",
 }
 
 
-def _fetch_klines_sync(symbol: str, days: int = 730) -> List[dict]:
-    """Fetch daily OHLCV from Yahoo Finance (runs in thread pool)."""
-    yf_symbol = _SYMBOL_MAP.get(symbol, symbol)
-    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+async def _fetch_klines(symbol: str, days: int = 730) -> List[dict]:
+    """Fetch daily OHLCV from CryptoCompare."""
+    cc_sym = _SYMBOL_MAP.get(symbol, symbol.replace("USDT", ""))
 
-    ticker = yf.Ticker(yf_symbol)
-    df = ticker.history(start=start_date, interval="1d", auto_adjust=True)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            _CC_BASE,
+            params={"fsym": cc_sym, "tsym": "USD", "limit": days},
+        )
+        r.raise_for_status()
+        data = r.json()
 
-    if df.empty:
-        logger.warning(f"[{symbol}] No data from Yahoo Finance")
-        return []
+    if data.get("Response") != "Success":
+        raise ValueError(f"CryptoCompare error for {symbol}: {data.get('Message')}")
 
     candles = []
-    for ts, row in df.iterrows():
+    for row in data["Data"]["Data"]:
+        if row["close"] == 0:
+            continue
         candles.append({
-            "symbol": symbol,
-            "timestamp": ts.to_pydatetime().replace(tzinfo=None),
-            "open":   float(row["Open"]),
-            "high":   float(row["High"]),
-            "low":    float(row["Low"]),
-            "close":  float(row["Close"]),
-            "volume": float(row["Volume"]),
+            "symbol":    symbol,
+            "timestamp": datetime.utcfromtimestamp(row["time"]),
+            "open":      float(row["open"]),
+            "high":      float(row["high"]),
+            "low":       float(row["low"]),
+            "close":     float(row["close"]),
+            "volume":    float(row["volumeto"]),
         })
     return candles
 
 
 def save_klines(candles: List[dict], db: Session) -> int:
-    """Upsert candles — skip rows that already exist."""
+    """Insert candles, skipping duplicates."""
     saved = 0
     for c in candles:
         exists = (
@@ -82,9 +89,9 @@ def save_klines(candles: List[dict], db: Session) -> int:
 
 
 async def backfill_symbol(symbol: str, days: int = 730):
-    """Backfill daily candles for a symbol."""
+    """Backfill daily candles for one symbol."""
     logger.info(f"Backfilling {symbol} for {days} days…")
-    candles = await asyncio.to_thread(_fetch_klines_sync, symbol, days)
+    candles = await _fetch_klines(symbol, days)
     db = SessionLocal()
     try:
         saved = save_klines(candles, db)
@@ -120,7 +127,7 @@ def load_ohlcv(symbol: str, limit: int = 200, db: Session = None) -> pd.DataFram
             {
                 "timestamp": r.timestamp,
                 "open": r.open, "high": r.high,
-                "low": r.low,  "close": r.close,
+                "low":  r.low,  "close": r.close,
                 "volume": r.volume,
             }
             for r in rows
@@ -136,7 +143,7 @@ async def scheduled_fetch():
     logger.info("Scheduled fetch starting…")
     for symbol in SUPPORTED_SYMBOLS:
         try:
-            candles = await asyncio.to_thread(_fetch_klines_sync, symbol, 5)
+            candles = await _fetch_klines(symbol, days=5)
             db = SessionLocal()
             try:
                 saved = save_klines(candles, db)
