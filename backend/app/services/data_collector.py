@@ -1,14 +1,14 @@
 """
 Data Collection Service
-Fetches OHLCV data from Binance and stores in PostgreSQL.
-Runs on a schedule via APScheduler.
+Fetches OHLCV data from Yahoo Finance and stores in PostgreSQL.
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
-import httpx
+import yfinance as yf
 from sqlalchemy.orm import Session
 
 from app.database.db import MarketData, SessionLocal
@@ -22,52 +22,48 @@ SUPPORTED_SYMBOLS = [
     "XRPUSDT", "DOTUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT",
 ]
 
-BINANCE_BASE = "https://api.binance.com"
-
-INTERVAL_MAP = {
-    "1h": "1h",
-    "4h": "4h",
-    "1d": "1d",
+_SYMBOL_MAP = {
+    "BTCUSDT":  "BTC-USD",
+    "ETHUSDT":  "ETH-USD",
+    "SOLUSDT":  "SOL-USD",
+    "BNBUSDT":  "BNB-USD",
+    "ADAUSDT":  "ADA-USD",
+    "XRPUSDT":  "XRP-USD",
+    "DOTUSDT":  "DOT-USD",
+    "AVAXUSDT": "AVAX-USD",
+    "MATICUSDT":"MATIC-USD",
+    "LINKUSDT": "LINK-USD",
 }
 
 
-async def fetch_klines(
-    symbol: str,
-    interval: str = "1d",
-    limit: int = 500,
-    start_time: Optional[int] = None,
-) -> List[dict]:
-    """Fetch candlestick data from Binance REST API."""
-    url = f"{BINANCE_BASE}/api/v3/klines"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit,
-    }
-    if start_time:
-        params["startTime"] = start_time
+def _fetch_klines_sync(symbol: str, days: int = 730) -> List[dict]:
+    """Fetch daily OHLCV from Yahoo Finance (runs in thread pool)."""
+    yf_symbol = _SYMBOL_MAP.get(symbol, symbol)
+    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        raw = response.json()
+    ticker = yf.Ticker(yf_symbol)
+    df = ticker.history(start=start_date, interval="1d", auto_adjust=True)
+
+    if df.empty:
+        logger.warning(f"[{symbol}] No data from Yahoo Finance")
+        return []
 
     candles = []
-    for k in raw:
+    for ts, row in df.iterrows():
         candles.append({
             "symbol": symbol,
-            "timestamp": datetime.utcfromtimestamp(k[0] / 1000),
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
+            "timestamp": ts.to_pydatetime().replace(tzinfo=None),
+            "open":   float(row["Open"]),
+            "high":   float(row["High"]),
+            "low":    float(row["Low"]),
+            "close":  float(row["Close"]),
+            "volume": float(row["Volume"]),
         })
     return candles
 
 
 def save_klines(candles: List[dict], db: Session) -> int:
-    """Save klines to DB, skip duplicates."""
+    """Upsert candles — skip rows that already exist."""
     saved = 0
     for c in candles:
         exists = (
@@ -85,26 +81,10 @@ def save_klines(candles: List[dict], db: Session) -> int:
     return saved
 
 
-async def fetch_and_store(symbol: str, interval: str = "1d", limit: int = 500):
-    """Fetch latest klines for a symbol and persist them."""
-    db = SessionLocal()
-    try:
-        candles = await fetch_klines(symbol, interval, limit)
-        saved = save_klines(candles, db)
-        logger.info(f"[{symbol}] Saved {saved} new candles ({interval})")
-        return saved
-    except Exception as e:
-        logger.error(f"[{symbol}] Fetch error: {e}")
-        raise
-    finally:
-        db.close()
-
-
 async def backfill_symbol(symbol: str, days: int = 730):
-    """Backfill 2 years of daily candles for a symbol."""
+    """Backfill daily candles for a symbol."""
     logger.info(f"Backfilling {symbol} for {days} days…")
-    start_ts = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
-    candles = await fetch_klines(symbol, "1d", limit=1000, start_time=start_ts)
+    candles = await asyncio.to_thread(_fetch_klines_sync, symbol, days)
     db = SessionLocal()
     try:
         saved = save_klines(candles, db)
@@ -120,7 +100,7 @@ async def backfill_all(days: int = 730):
 
 
 def load_ohlcv(symbol: str, limit: int = 200, db: Session = None) -> pd.DataFrame:
-    """Load OHLCV from DB into a DataFrame."""
+    """Load OHLCV from DB into a sorted DataFrame."""
     close_db = False
     if db is None:
         db = SessionLocal()
@@ -136,18 +116,15 @@ def load_ohlcv(symbol: str, limit: int = 200, db: Session = None) -> pd.DataFram
         if not rows:
             return pd.DataFrame()
 
-        data = [
+        df = pd.DataFrame([
             {
                 "timestamp": r.timestamp,
-                "open": r.open,
-                "high": r.high,
-                "low": r.low,
-                "close": r.close,
+                "open": r.open, "high": r.high,
+                "low": r.low,  "close": r.close,
                 "volume": r.volume,
             }
             for r in rows
-        ]
-        df = pd.DataFrame(data).sort_values("timestamp").reset_index(drop=True)
+        ]).sort_values("timestamp").reset_index(drop=True)
         return df
     finally:
         if close_db:
@@ -155,8 +132,18 @@ def load_ohlcv(symbol: str, limit: int = 200, db: Session = None) -> pd.DataFram
 
 
 async def scheduled_fetch():
-    """Called by APScheduler every hour."""
+    """APScheduler hook — runs every hour to keep data fresh."""
     logger.info("Scheduled fetch starting…")
     for symbol in SUPPORTED_SYMBOLS:
-        await fetch_and_store(symbol, interval="1d", limit=10)
+        try:
+            candles = await asyncio.to_thread(_fetch_klines_sync, symbol, 5)
+            db = SessionLocal()
+            try:
+                saved = save_klines(candles, db)
+                if saved:
+                    logger.info(f"[{symbol}] +{saved} new candles")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"[{symbol}] Scheduled fetch error: {e}")
     logger.info("Scheduled fetch complete")
